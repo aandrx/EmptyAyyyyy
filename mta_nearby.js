@@ -5,6 +5,13 @@
 // Layout: small-medium landscape widget — ultra-compact 3-row design
 
 // ===================================================
+// FONTS  (matches countdown.js)
+// ===================================================
+
+const FONT_REG = (size) => new Font("Menlo", size);
+const FONT_BOLD = (size) => new Font("Menlo-Bold", size);
+
+// ===================================================
 // CONFIGURATION
 // ===================================================
 
@@ -145,13 +152,13 @@ function drawTrainPill(parent, route, mins) {
   badge.setPadding(1, 4, 1, 4);
   badge.centerAlignContent();
   const routeLbl = badge.addText(route);
-  routeLbl.font = Font.boldSystemFont(10);
+  routeLbl.font = FONT_BOLD(10);
   routeLbl.textColor = new Color(lineTextColor(route));
   routeLbl.lineLimit = 1;
 
   // Arrival time
   const timeLbl = pill.addText(formatTime(mins));
-  timeLbl.font = Font.monospacedDigitSystemFont(10);
+  timeLbl.font = FONT_REG(10);
   timeLbl.textColor = urgencyColor(mins);
   timeLbl.lineLimit = 1;
 }
@@ -165,13 +172,13 @@ function drawDirectionRow(parent, label, trains) {
 
   // Direction label  ↑ / ↓
   const dirLbl = row.addText(label);
-  dirLbl.font = Font.boldSystemFont(10);
+  dirLbl.font = FONT_BOLD(10);
   dirLbl.textColor = new Color("#555555");
   dirLbl.lineLimit = 1;
 
   if (trains.length === 0) {
     const none = row.addText("no service");
-    none.font = Font.italicSystemFont(9);
+    none.font = FONT_REG(9);
     none.textColor = new Color("#444444");
   } else {
     for (const t of trains) {
@@ -199,7 +206,7 @@ function drawStationBlock(col, station, userLat, userLon) {
   nameRow.spacing = 5;
 
   const name = nameRow.addText(station.name.toUpperCase());
-  name.font = Font.boldSystemFont(9);
+  name.font = FONT_BOLD(9);
   name.textColor = new Color("#FFFFFF");
   name.lineLimit = 1;
   name.minimumScaleFactor = 0.6;
@@ -207,7 +214,7 @@ function drawStationBlock(col, station, userLat, userLon) {
   nameRow.addSpacer();
 
   const dist_lbl = nameRow.addText(formatDistance(dist));
-  dist_lbl.font = Font.systemFont(8);
+  dist_lbl.font = FONT_REG(8);
   dist_lbl.textColor = new Color("#555555");
   dist_lbl.lineLimit = 1;
 
@@ -229,13 +236,13 @@ function drawStationBlock(col, station, userLat, userLon) {
 function showError(widget, msg, sub = null) {
   widget.addSpacer();
   const t = widget.addText(msg);
-  t.font = Font.boldSystemFont(11);
+  t.font = FONT_BOLD(11);
   t.textColor = new Color("#EE352E");
   t.centerAlignText();
   if (sub) {
     widget.addSpacer(4);
     const s = widget.addText(sub);
-    s.font = Font.systemFont(9);
+    s.font = FONT_REG(9);
     s.textColor = new Color("#666666");
     s.centerAlignText();
   }
@@ -265,12 +272,12 @@ async function run() {
   mtaBadge.setPadding(2, 5, 2, 5);
   mtaBadge.centerAlignContent();
   const mtaLbl = mtaBadge.addText("MTA");
-  mtaLbl.font = Font.boldSystemFont(8);
+  mtaLbl.font = FONT_BOLD(8);
   mtaLbl.textColor = new Color("#FFFFFF");
 
   // Station name placeholder — filled in after fetch
   const stationNameText = header.addText("Loading…");
-  stationNameText.font = Font.boldSystemFont(11);
+  stationNameText.font = FONT_BOLD(11);
   stationNameText.textColor = new Color("#FFFFFF");
   stationNameText.lineLimit = 1;
   stationNameText.minimumScaleFactor = 0.6;
@@ -289,11 +296,11 @@ async function run() {
   refreshStack.spacing = 3;
 
   const refreshIcon = refreshStack.addText("↺");
-  refreshIcon.font = Font.boldSystemFont(11);
+  refreshIcon.font = FONT_BOLD(11);
   refreshIcon.textColor = new Color("#444444");
 
   const timeLbl = refreshStack.addText(timeStr);
-  timeLbl.font = Font.monospacedDigitSystemFont(9);
+  timeLbl.font = FONT_REG(9);
   timeLbl.textColor = new Color("#444444");
 
   // ── Divider below header ──────────────────────────
@@ -373,7 +380,7 @@ async function run() {
     drawStationBlock(rightCol, stations[1], lat, lon);
   } else {
     const ph = rightCol.addText("No second station");
-    ph.font = Font.italicSystemFont(9);
+    ph.font = FONT_REG(9);
     ph.textColor = new Color("#444444");
   }
 
