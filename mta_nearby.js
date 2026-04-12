@@ -2,23 +2,59 @@
 // for use in Scriptable on iOS
 // Uses the MTAPI proxy (wheresthefuckingtrain.com) for location-based JSON
 // API docs: https://github.com/jonthornton/MTAPI/blob/master/docs/endpoints.md
-// Layout: small-medium landscape widget — ultra-compact 3-row design
+// Layout: medium landscape widget — compact 3-row design
 
 // ===================================================
-// FONTS  (matches countdown.js)
+// FONTS
 // ===================================================
 
 const FONT_REG = (size) => new Font("Menlo", size);
 const FONT_BOLD = (size) => new Font("Menlo-Bold", size);
+const SYS_REG = (size) => Font.systemFont(size);
+const SYS_BOLD = (size) => Font.boldSystemFont(size);
 
 // ===================================================
 // CONFIGURATION
 // ===================================================
 
-const MTAPI_BASE = "https://www.wheresthefuckingtrain.com";
+const MTAPI_BASE = "https://api.wheresthefuckingtrain.com";
 const MAX_TRAINS = 3; // arrivals per direction per station
-const MAX_STATIONS = 2; // must be 2 for side-by-side columns
+const MAX_STATIONS = 2; // must be 2 for side-by-side layout
 const MAX_MINUTES = 30; // ignore trains beyond this many minutes out
+const LOC_CACHE_SECS = 300; // reuse cached location if < 5 min old
+const DATA_CACHE_SECS = 30; // reuse cached API response if < 30 sec old
+const REFRESH_SECS = 300; // ask iOS to refresh widget every 5 min
+
+// ===================================================
+// CACHE  (FileManager-backed)
+// ===================================================
+
+const FM = FileManager.local();
+const CACHE_DIR = FM.joinPath(FM.cacheDirectory(), "mta_nearby");
+
+if (!FM.fileExists(CACHE_DIR)) FM.createDirectory(CACHE_DIR, true);
+
+function cachePath(name) {
+  return FM.joinPath(CACHE_DIR, name + ".json");
+}
+
+function readCache(name, maxAgeSecs) {
+  const path = cachePath(name);
+  if (!FM.fileExists(path)) return null;
+  const ageMs = Date.now() - FM.modificationDate(path).getTime();
+  if (ageMs > maxAgeSecs * 1000) return null;
+  try {
+    return JSON.parse(FM.readString(path));
+  } catch {
+    return null;
+  }
+}
+
+function writeCache(name, data) {
+  try {
+    FM.writeString(cachePath(name), JSON.stringify(data));
+  } catch {}
+}
 
 // ===================================================
 // MTA OFFICIAL LINE COLORS
@@ -26,52 +62,39 @@ const MAX_MINUTES = 30; // ignore trains beyond this many minutes out
 // ===================================================
 
 const LINE_COLORS = {
-  // IRT Broadway / 7th Ave
   1: "#EE352E",
   2: "#EE352E",
   3: "#EE352E",
-  // IND 8th Ave
   A: "#0039A6",
   C: "#0039A6",
   E: "#0039A6",
-  // IND 6th Ave
   B: "#FF6319",
   D: "#FF6319",
   F: "#FF6319",
   M: "#FF6319",
-  // BMT Broadway
   N: "#FCCC0A",
   Q: "#FCCC0A",
   R: "#FCCC0A",
   W: "#FCCC0A",
-  // IRT Lexington Ave
   4: "#00933C",
   5: "#00933C",
   6: "#00933C",
   "6X": "#00933C",
-  // IRT Flushing
   7: "#B933AD",
   "7X": "#B933AD",
-  // BMT Canarsie
   L: "#A7A9AC",
-  // IND Crosstown
   G: "#6CBE45",
-  // BMT Jamaica / Nassau
   J: "#996633",
   Z: "#996633",
-  // Shuttles
   S: "#808183",
-  // SIR
   SI: "#0039A6",
 };
 
-// Lines whose badge background is light enough to need black text
 const DARK_TEXT_LINES = new Set(["N", "Q", "R", "W", "L", "G"]);
 
 function lineColor(route) {
   return LINE_COLORS[route] || "#808183";
 }
-
 function lineTextColor(route) {
   return DARK_TEXT_LINES.has(route) ? "#000000" : "#FFFFFF";
 }
@@ -84,10 +107,8 @@ function minutesUntil(isoString) {
   return Math.round((new Date(isoString) - new Date()) / 60000);
 }
 
-// Single-digit or "~" for imminent, no "min" label — keeps pills compact
 function formatTime(mins) {
   if (mins <= 0) return "~";
-  if (mins >= 10) return String(mins); // two digits still fine
   return String(mins);
 }
 
@@ -97,7 +118,6 @@ function urgencyColor(mins) {
   return new Color("#E0E0E0");
 }
 
-// Haversine distance
 function distanceMiles(lat1, lon1, lat2, lon2) {
   const R = 3958.8;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -115,7 +135,6 @@ function formatDistance(miles) {
   return `${miles.toFixed(2)} mi`;
 }
 
-// Returns { N: [...], S: [...] } each sorted by arrival time
 function trainsByDirection(station) {
   const result = { N: [], S: [] };
   for (const dir of ["N", "S"]) {
@@ -132,54 +151,94 @@ function trainsByDirection(station) {
 }
 
 // ===================================================
+// LOCATION  (cached)
+// ===================================================
+
+async function getLocation() {
+  // 1. Try fresh GPS — lowest accuracy class that still works for subway stops
+  try {
+    Location.setAccuracyToKilometer();
+    const loc = await Location.current();
+    writeCache("location", { lat: loc.latitude, lon: loc.longitude });
+    return { lat: loc.latitude, lon: loc.longitude };
+  } catch {}
+
+  // 2. Fall back to cached location if GPS failed
+  const cached = readCache("location", LOC_CACHE_SECS);
+  if (cached) return cached;
+
+  return null;
+}
+
+// ===================================================
+// FETCH  (cached)
+// ===================================================
+
+async function fetchStations(lat, lon) {
+  // 1. Try fresh network request
+  try {
+    const req = new Request(`${MTAPI_BASE}/by-location?lat=${lat}&lon=${lon}`);
+    req.timeoutInterval = 8;
+    const data = await req.loadJSON();
+    const stations = (data.data || []).slice(0, MAX_STATIONS);
+    if (stations.length > 0) {
+      writeCache("stations", stations);
+      return stations;
+    }
+  } catch {}
+
+  // 2. Fall back to cached station data if network failed
+  const cached = readCache("stations", DATA_CACHE_SECS);
+  if (cached) return cached;
+
+  return [];
+}
+
+// ===================================================
 // DRAWING PRIMITIVES
 // ===================================================
 
-// Circular-ish line bullet: colored background, bold route letter, time right of it
 function drawTrainPill(parent, route, mins) {
   const pill = parent.addStack();
   pill.layoutHorizontally();
   pill.centerAlignContent();
-  pill.spacing = 3;
-  pill.setPadding(2, 4, 2, 6);
-  pill.backgroundColor = new Color("#1E1E1E");
-  pill.cornerRadius = 5;
+  pill.spacing = 5;
+  pill.setPadding(0, 0, 0, 4);
 
-  // Colored route badge
+  // Route badge — border only, colored border + text, no fill
   const badge = pill.addStack();
-  badge.backgroundColor = new Color(lineColor(route));
-  badge.cornerRadius = 3;
-  badge.setPadding(1, 4, 1, 4);
+  badge.cornerRadius = 4;
+  badge.setPadding(2, 5, 2, 5);
   badge.centerAlignContent();
+  badge.borderColor = new Color(lineColor(route));
+  badge.borderWidth = 2;
   const routeLbl = badge.addText(route);
-  routeLbl.font = FONT_BOLD(10);
-  routeLbl.textColor = new Color(lineTextColor(route));
+  routeLbl.font = SYS_BOLD(12);
+  routeLbl.textColor = new Color(lineColor(route));
   routeLbl.lineLimit = 1;
 
   // Arrival time
   const timeLbl = pill.addText(formatTime(mins));
-  timeLbl.font = FONT_REG(10);
+  timeLbl.font = SYS_BOLD(12);
   timeLbl.textColor = urgencyColor(mins);
   timeLbl.lineLimit = 1;
 }
 
-// One direction row: arrow label + train pills
 function drawDirectionRow(parent, label, trains) {
   const row = parent.addStack();
   row.layoutHorizontally();
   row.centerAlignContent();
-  row.spacing = 5;
+  row.spacing = 6;
 
-  // Direction label  ↑ / ↓
   const dirLbl = row.addText(label);
-  dirLbl.font = FONT_BOLD(10);
-  dirLbl.textColor = new Color("#555555");
+  dirLbl.font = SYS_BOLD(12);
+  dirLbl.textColor = new Color("#666666");
   dirLbl.lineLimit = 1;
 
   if (trains.length === 0) {
     const none = row.addText("no service");
-    none.font = FONT_REG(9);
-    none.textColor = new Color("#444444");
+    none.font = SYS_REG(11);
+    none.textColor = new Color("#555555");
   } else {
     for (const t of trains) {
       drawTrainPill(row, t.route, t.mins);
@@ -189,43 +248,33 @@ function drawDirectionRow(parent, label, trains) {
   row.addSpacer();
 }
 
-// ===================================================
-// STATION BLOCK
-// Fills one half (left or right column) of the widget body
-// ===================================================
-
 function drawStationBlock(col, station, userLat, userLon) {
   const [sLat, sLon] = station.location;
   const dist = distanceMiles(userLat, userLon, sLat, sLon);
   const trains = trainsByDirection(station);
 
-  // ── Station name + distance ──────────────────────
   const nameRow = col.addStack();
   nameRow.layoutHorizontally();
   nameRow.centerAlignContent();
   nameRow.spacing = 5;
 
   const name = nameRow.addText(station.name.toUpperCase());
-  name.font = FONT_BOLD(9);
+  name.font = SYS_BOLD(12);
   name.textColor = new Color("#FFFFFF");
   name.lineLimit = 1;
   name.minimumScaleFactor = 0.6;
 
   nameRow.addSpacer();
 
-  const dist_lbl = nameRow.addText(formatDistance(dist));
-  dist_lbl.font = FONT_REG(8);
-  dist_lbl.textColor = new Color("#555555");
-  dist_lbl.lineLimit = 1;
-
-  col.addSpacer(5);
-
-  // ── Uptown row ────────────────────────────────────
-  drawDirectionRow(col, "↑", trains.N);
+  const distLbl = nameRow.addText(formatDistance(dist));
+  distLbl.font = SYS_REG(10);
+  distLbl.textColor = new Color("#888888");
+  distLbl.lineLimit = 1;
 
   col.addSpacer(4);
 
-  // ── Downtown row ──────────────────────────────────
+  drawDirectionRow(col, "↑", trains.N);
+  col.addSpacer(3);
   drawDirectionRow(col, "↓", trains.S);
 }
 
@@ -236,14 +285,14 @@ function drawStationBlock(col, station, userLat, userLon) {
 function showError(widget, msg, sub = null) {
   widget.addSpacer();
   const t = widget.addText(msg);
-  t.font = FONT_BOLD(11);
-  t.textColor = new Color("#EE352E");
+  t.font = SYS_BOLD(11);
+  t.textColor = Color.dynamic(new Color("#CC0000"), new Color("#EE352E"));
   t.centerAlignText();
   if (sub) {
     widget.addSpacer(4);
     const s = widget.addText(sub);
-    s.font = FONT_REG(9);
-    s.textColor = new Color("#666666");
+    s.font = SYS_REG(9);
+    s.textColor = Color.dynamic(new Color("#444444"), new Color("#666666"));
     s.centerAlignText();
   }
   widget.addSpacer();
@@ -255,124 +304,144 @@ function showError(widget, msg, sub = null) {
 
 async function run() {
   const widget = new ListWidget();
-  widget.backgroundColor = new Color("#111111");
-  widget.setPadding(10, 12, 10, 12);
+  widget.backgroundColor = new Color("#000000");
+  widget.setPadding(0, 16, 0, 16);
 
-  // ── HEADER ROW ────────────────────────────────────
-  // [MTA]  Closest station name          ↺ updated time
+  // Ask iOS to refresh on schedule
+  const nextRefresh = new Date();
+  nextRefresh.setSeconds(nextRefresh.getSeconds() + REFRESH_SECS);
+  widget.refreshAfterDate = nextRefresh;
+
+  // Tapping the widget re-runs the script immediately
+  widget.url = `scriptable:///run/${encodeURIComponent(Script.name())}`;
+
+  // ── HEADER ──────────────────────────────────────────────────────────────
   const header = widget.addStack();
   header.layoutHorizontally();
   header.centerAlignContent();
-  header.spacing = 6;
+  header.spacing = 7;
+  header.setPadding(2, 0, 2, 0);
 
-  // MTA badge
   const mtaBadge = header.addStack();
-  mtaBadge.backgroundColor = new Color("#0039A6");
+  // No fill — border only with the MTA blue as the text/border color
   mtaBadge.cornerRadius = 4;
-  mtaBadge.setPadding(2, 5, 2, 5);
+  mtaBadge.setPadding(4, 7, 4, 7);
   mtaBadge.centerAlignContent();
+  mtaBadge.borderColor = new Color("#0039A6");
+  mtaBadge.borderWidth = 2;
   const mtaLbl = mtaBadge.addText("MTA");
-  mtaLbl.font = FONT_BOLD(8);
-  mtaLbl.textColor = new Color("#FFFFFF");
+  mtaLbl.font = SYS_BOLD(16);
+  mtaLbl.textColor = new Color("#0039A6");
 
-  // Station name placeholder — filled in after fetch
+  // Placeholder — overwritten after data resolves
   const stationNameText = header.addText("Loading…");
-  stationNameText.font = FONT_BOLD(11);
+  stationNameText.font = FONT_BOLD(28);
   stationNameText.textColor = new Color("#FFFFFF");
   stationNameText.lineLimit = 1;
-  stationNameText.minimumScaleFactor = 0.6;
+  stationNameText.minimumScaleFactor = 0.5;
 
   header.addSpacer();
 
-  // Refresh symbol + last-updated time
   const now = new Date();
   const timeStr = now.toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
   });
-  const refreshStack = header.addStack();
-  refreshStack.layoutHorizontally();
-  refreshStack.centerAlignContent();
-  refreshStack.spacing = 3;
+  const timeLbl = header.addText(timeStr);
+  timeLbl.font = FONT_BOLD(20);
+  timeLbl.textColor = new Color("#888888");
 
-  const refreshIcon = refreshStack.addText("↺");
-  refreshIcon.font = FONT_BOLD(11);
-  refreshIcon.textColor = new Color("#444444");
-
-  const timeLbl = refreshStack.addText(timeStr);
-  timeLbl.font = FONT_REG(9);
-  timeLbl.textColor = new Color("#444444");
-
-  // ── Divider below header ──────────────────────────
-  widget.addSpacer(6);
+  // ── Divider ─────────────────────────────────────────────────────────────
+  widget.addSpacer(2);
   const rule = widget.addStack();
-  rule.backgroundColor = new Color("#222222");
+  rule.backgroundColor = new Color("#333333");
   rule.size = new Size(0, 1);
-  widget.addSpacer(7);
+  widget.addSpacer(3);
 
-  // ── Location ──────────────────────────────────────
-  let lat, lon;
-  try {
-    Location.setAccuracyToHundredMeters();
-    const loc = await Location.current();
-    lat = loc.latitude;
-    lon = loc.longitude;
-  } catch (e) {
-    showError(
-      widget,
-      "⚠️ Location unavailable",
-      "Enable location for Scriptable",
-    );
-    Script.setWidget(widget);
-    await widget.presentMedium();
-    Script.complete();
-    return;
+  // ── Data — location + fetch fired in parallel ────────────────────────────
+  // getLocation() reads cache first so it often returns instantly.
+  // If location cache is warm, fetchStations from the last known coords
+  // can also be pre-seeded from the data cache — both resolve in one tick.
+  const locCache = readCache("location", LOC_CACHE_SECS);
+  const stationCache = readCache("stations", DATA_CACHE_SECS);
+
+  let lat, lon, stations;
+
+  if (locCache && stationCache) {
+    // Both caches warm — no async work at all, render immediately
+    ({ lat, lon } = locCache);
+    stations = stationCache;
+  } else {
+    // Fire location lookup; if location cache exists use it for the fetch
+    // immediately while fresh GPS resolves in background
+    const locPromise = getLocation();
+
+    // If we have a stale-but-present location, kick off the fetch in parallel
+    const prefetchLat = locCache ? locCache.lat : null;
+    const prefetchLon = locCache ? locCache.lon : null;
+    const fetchPromise = prefetchLat
+      ? fetchStations(prefetchLat, prefetchLon)
+      : locPromise.then((l) => (l ? fetchStations(l.lat, l.lon) : []));
+
+    // Await both
+    const [locResult, fetchResult] = await Promise.all([
+      locPromise,
+      fetchPromise,
+    ]);
+
+    if (!locResult) {
+      showError(
+        widget,
+        "⚠️ Location unavailable",
+        "Enable location for Scriptable",
+      );
+      Script.setWidget(widget);
+      if (!config.runsInWidget) await widget.presentMedium();
+      Script.complete();
+      return;
+    }
+
+    lat = locResult.lat;
+    lon = locResult.lon;
+    stations = fetchResult;
+
+    // If parallel fetch used stale coords, re-fetch with fresh coords if they differ
+    if (
+      prefetchLat !== null &&
+      (Math.abs(prefetchLat - lat) > 0.005 ||
+        Math.abs(prefetchLon - lon) > 0.005)
+    ) {
+      stations = await fetchStations(lat, lon);
+    }
   }
 
-  // ── Fetch ─────────────────────────────────────────
-  let stations = [];
-  try {
-    const req = new Request(`${MTAPI_BASE}/by-location?lat=${lat}&lon=${lon}`);
-    req.timeoutInterval = 10;
-    const data = await req.loadJSON();
-    stations = (data.data || []).slice(0, MAX_STATIONS);
-  } catch (e) {
+  if (!stations || stations.length === 0) {
     showError(widget, "⚠️ Could not load MTA data", "Check connection");
     Script.setWidget(widget);
-    await widget.presentMedium();
+    if (!config.runsInWidget) await widget.presentMedium();
     Script.complete();
     return;
   }
 
-  if (stations.length === 0) {
-    showError(widget, "No stations found nearby");
-    Script.setWidget(widget);
-    await widget.presentMedium();
-    Script.complete();
-    return;
-  }
-
-  // Update header station name to closest station
+  // ── Populate header station name ─────────────────────────────────────────
   stationNameText.text = stations[0].name.toUpperCase();
 
-  // ── Two-column body ───────────────────────────────
+  // ── Two-column body ───────────────────────────────────────────────────────
   const body = widget.addStack();
   body.layoutHorizontally();
   body.spacing = 0;
+  body.setPadding(0, 0, 0, 0);
 
-  // Left column — closest station
   const leftCol = body.addStack();
   leftCol.layoutVertically();
   drawStationBlock(leftCol, stations[0], lat, lon);
 
-  // Vertical divider
   body.addSpacer(10);
   const divider = body.addStack();
-  divider.backgroundColor = new Color("#222222");
+  divider.backgroundColor = new Color("#333333");
   divider.size = new Size(1, 0);
   body.addSpacer(10);
 
-  // Right column — second closest station (or fallback)
   const rightCol = body.addStack();
   rightCol.layoutVertically();
 
@@ -380,11 +449,24 @@ async function run() {
     drawStationBlock(rightCol, stations[1], lat, lon);
   } else {
     const ph = rightCol.addText("No second station");
-    ph.font = FONT_REG(9);
-    ph.textColor = new Color("#444444");
+    ph.font = SYS_REG(9);
+    ph.textColor = Color.dynamic(new Color("#555555"), new Color("#444444"));
+    rightCol.addSpacer();
   }
 
-  // ── Present ───────────────────────────────────────
+  // ── Footer — last updated time ────────────────────────────────────────────
+  widget.addSpacer(3);
+  const footerRow = widget.addStack();
+  footerRow.layoutHorizontally();
+  footerRow.centerAlignContent();
+  footerRow.setPadding(0, 0, 2, 0);
+  footerRow.addSpacer();
+
+  const updatedLbl = footerRow.addText("↺ " + timeStr);
+  updatedLbl.font = SYS_REG(9);
+  updatedLbl.textColor = new Color("#444444");
+
+  // ── Present ───────────────────────────────────────────────────────────────
   if (config.runsInWidget) {
     Script.setWidget(widget);
   } else {
