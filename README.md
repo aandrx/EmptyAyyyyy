@@ -6,6 +6,7 @@ uses the [wheresthefuckingtrain](https://api.wheresthefuckingtrain.com) API to c
 
 to use this widget: 
 - download the .scriptable file, and then just open it with Scriptable on iOS -> this should automatically create the widget inside of Scriptable
+- an easy way to do this is just ot clone this repo and send yourself the file through discord to open on your mobile device, then it will show an option to directly "open with Scriptable" and will setup the script for you automatically 
 
 use this widget in the landscape form factor only (for now), meaning the widget on iphones that take up a 2x4 space on your screen (or else UI will break) 
 
